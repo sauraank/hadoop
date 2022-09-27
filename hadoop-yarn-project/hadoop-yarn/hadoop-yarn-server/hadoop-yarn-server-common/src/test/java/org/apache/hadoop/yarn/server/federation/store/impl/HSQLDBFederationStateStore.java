@@ -18,9 +18,18 @@
 
 package org.apache.hadoop.yarn.server.federation.store.impl;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.federation.store.FederationStateStore;
@@ -57,6 +66,12 @@ public class HSQLDBFederationStateStore extends SQLFederationStateStore {
       "CREATE TABLE policies ( queue varchar(256) NOT NULL,"
           + " policyType varchar(256) NOT NULL, params varbinary(512),"
           + " CONSTRAINT pk_queue PRIMARY KEY (queue))";
+
+  private static final String TABLE_RESERVATIONSHOMESUBCLUSTER =
+      " CREATE TABLE reservationsHomeSubCluster ("
+           + " reservationId varchar(128) NOT NULL,"
+           + " homeSubCluster varchar(256) NOT NULL,"
+           + " CONSTRAINT pk_reservationId PRIMARY KEY (reservationId))";
 
   private static final String SP_REGISTERSUBCLUSTER =
       "CREATE PROCEDURE sp_registerSubCluster("
@@ -201,14 +216,106 @@ public class HSQLDBFederationStateStore extends SQLFederationStateStore {
           + " DECLARE result CURSOR FOR"
           + " SELECT * FROM policies; OPEN result; END";
 
+  private static final String SP_ADDRESERVATIONHOMESUBCLUSTER =
+      "CREATE PROCEDURE sp_addReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128),"
+          + " IN homeSubCluster_IN varchar(256),"
+          + " OUT storedHomeSubCluster_OUT varchar(256), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " INSERT INTO reservationsHomeSubCluster "
+          + " (reservationId,homeSubCluster) "
+          + " (SELECT reservationId_IN, homeSubCluster_IN"
+          + " FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN"
+          + " HAVING COUNT(*) = 0 );"
+          + " GET DIAGNOSTICS rowCount_OUT = ROW_COUNT;"
+          + " SELECT homeSubCluster INTO storedHomeSubCluster_OUT"
+          + " FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN; END";
+
+  private static final String SP_GETRESERVATIONHOMESUBCLUSTER =
+      "CREATE PROCEDURE sp_getReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128),"
+          + " OUT homeSubCluster_OUT varchar(256))"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " SELECT homeSubCluster INTO homeSubCluster_OUT"
+          + " FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN; END";
+
+  private static final String SP_GETRESERVATIONSHOMESUBCLUSTER =
+      "CREATE PROCEDURE sp_getReservationsHomeSubCluster()"
+          + " MODIFIES SQL DATA DYNAMIC RESULT SETS 1 BEGIN ATOMIC"
+          + " DECLARE result CURSOR FOR"
+          + " SELECT reservationId, homeSubCluster"
+          + " FROM reservationsHomeSubCluster; OPEN result; END";
+
+  private static final String SP_DELETERESERVATIONHOMESUBCLUSTER =
+      "CREATE PROCEDURE sp_deleteReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " DELETE FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN;"
+          + " GET DIAGNOSTICS rowCount_OUT = ROW_COUNT; END";
+
+  private static final String SP_UPDATERESERVATIONHOMESUBCLUSTER =
+      "CREATE PROCEDURE sp_updateReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128),"
+          + " IN homeSubCluster_IN varchar(256), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " UPDATE reservationsHomeSubCluster"
+          + " SET homeSubCluster = homeSubCluster_IN"
+          + " WHERE reservationId = reservationId_IN;"
+          + " GET DIAGNOSTICS rowCount_OUT = ROW_COUNT; END";
+
+  protected static final String SP_DROP_ADDRESERVATIONHOMESUBCLUSTER =
+      "DROP PROCEDURE sp_addReservationHomeSubCluster";
+
+  protected static final String SP_ADDRESERVATIONHOMESUBCLUSTER2 =
+      "CREATE PROCEDURE sp_addReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128),"
+          + " IN homeSubCluster_IN varchar(256),"
+          + " OUT storedHomeSubCluster_OUT varchar(256), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " INSERT INTO reservationsHomeSubCluster "
+          + " (reservationId,homeSubCluster) "
+          + " (SELECT reservationId_IN, homeSubCluster_IN"
+          + " FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN"
+          + " HAVING COUNT(*) = 0 );"
+          + " SELECT homeSubCluster, 2 INTO storedHomeSubCluster_OUT, rowCount_OUT"
+          + " FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN; END";
+
+  protected static final String SP_DROP_UPDATERESERVATIONHOMESUBCLUSTER =
+      "DROP PROCEDURE sp_updateReservationHomeSubCluster";
+
+  protected static final String SP_UPDATERESERVATIONHOMESUBCLUSTER2 =
+      "CREATE PROCEDURE sp_updateReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128),"
+          + " IN homeSubCluster_IN varchar(256), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " UPDATE reservationsHomeSubCluster"
+          + " SET homeSubCluster = homeSubCluster_IN"
+          + " WHERE reservationId = reservationId_IN;"
+          + " SET rowCount_OUT = 2; END";
+
+  protected static final String SP_DROP_DELETERESERVATIONHOMESUBCLUSTER =
+      "DROP PROCEDURE sp_deleteReservationHomeSubCluster";
+
+  protected static final String SP_DELETERESERVATIONHOMESUBCLUSTER2 =
+      "CREATE PROCEDURE sp_deleteReservationHomeSubCluster("
+          + " IN reservationId_IN varchar(128), OUT rowCount_OUT int)"
+          + " MODIFIES SQL DATA BEGIN ATOMIC"
+          + " DELETE FROM reservationsHomeSubCluster"
+          + " WHERE reservationId = reservationId_IN;"
+          + " SET rowCount_OUT = 2; END";
+
+  private List<String> tables = new ArrayList<>();
+
   @Override
   public void init(Configuration conf) {
     try {
       super.init(conf);
-    } catch (YarnException e1) {
-      LOG.error("ERROR: failed to init HSQLDB " + e1.getMessage());
-    }
-    try {
       conn = super.conn;
 
       LOG.info("Database Init: Start");
@@ -216,6 +323,7 @@ public class HSQLDBFederationStateStore extends SQLFederationStateStore {
       conn.prepareStatement(TABLE_APPLICATIONSHOMESUBCLUSTER).execute();
       conn.prepareStatement(TABLE_MEMBERSHIP).execute();
       conn.prepareStatement(TABLE_POLICIES).execute();
+      conn.prepareStatement(TABLE_RESERVATIONSHOMESUBCLUSTER).execute();
 
       conn.prepareStatement(SP_REGISTERSUBCLUSTER).execute();
       conn.prepareStatement(SP_DEREGISTERSUBCLUSTER).execute();
@@ -233,9 +341,24 @@ public class HSQLDBFederationStateStore extends SQLFederationStateStore {
       conn.prepareStatement(SP_GETPOLICYCONFIGURATION).execute();
       conn.prepareStatement(SP_GETPOLICIESCONFIGURATIONS).execute();
 
+      conn.prepareStatement(SP_ADDRESERVATIONHOMESUBCLUSTER).execute();
+      conn.prepareStatement(SP_GETRESERVATIONHOMESUBCLUSTER).execute();
+      conn.prepareStatement(SP_GETRESERVATIONSHOMESUBCLUSTER).execute();
+      conn.prepareStatement(SP_DELETERESERVATIONHOMESUBCLUSTER).execute();
+      conn.prepareStatement(SP_UPDATERESERVATIONHOMESUBCLUSTER).execute();
+
       LOG.info("Database Init: Complete");
-    } catch (SQLException e) {
-      LOG.error("ERROR: failed to inizialize HSQLDB " + e.getMessage());
+    } catch (Exception e) {
+      LOG.error("ERROR: failed to initialize HSQLDB {}.", e.getMessage());
+    }
+  }
+
+  public void initConnection(Configuration conf) {
+    try {
+      super.init(conf);
+      conn = super.conn;
+    } catch (YarnException e1) {
+      LOG.error("ERROR: failed open connection to HSQLDB DB {}.", e1.getMessage());
     }
   }
 
@@ -243,9 +366,38 @@ public class HSQLDBFederationStateStore extends SQLFederationStateStore {
     try {
       conn.close();
     } catch (SQLException e) {
-      LOG.error(
-          "ERROR: failed to close connection to HSQLDB DB " + e.getMessage());
+      LOG.error("ERROR: failed to close connection to HSQLDB DB {}.", e.getMessage());
     }
   }
 
+  /**
+   * Extract The Create Table Sql From The Script.
+   *
+   * @param dbIdentifier database identifier, Like Mysql / SqlServer
+   * @param regex the regex
+   * @throws IOException IO exception.
+   */
+  protected void extractCreateTableSQL(String dbIdentifier, String regex) throws IOException {
+
+    String[] createTableScriptPathItems = new String[] {
+        ".", "target", "test-classes", dbIdentifier, "FederationStateStoreTables.sql" };
+    String createTableScriptPath = StringUtils.join(createTableScriptPathItems, File.separator);
+
+    String createTableSQL =
+        FileUtils.readFileToString(new File(createTableScriptPath), StandardCharsets.UTF_8);
+    Pattern p = Pattern.compile(regex);
+    Matcher m = p.matcher(createTableSQL);
+    while (m != null && m.find()) {
+      String group = m.group();
+      tables.add(group);
+    }
+  }
+
+  public List<String> getTables() {
+    return tables;
+  }
+
+  public void setTables(List<String> tables) {
+    this.tables = tables;
+  }
 }
